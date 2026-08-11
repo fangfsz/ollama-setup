@@ -21,13 +21,50 @@ is_interactive() {
 }
 
 # 检查是否通过管道运行（curl ... | bash）
+# 兼容 POSIX sh
 is_piped() {
-    if [ -n "${BASH_VERSION:-}" ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
-        # 通过 bash -s 运行（curl | bash 常用方式）
+    # 如果通过 bash 运行但脚本来源不是文件（BASH_SOURCE 为空表示通过管道）
+    if [ -n "${BASH_VERSION:-}" ]; then
+        if [ -z "${BASH_SOURCE[0]:-}" ]; then
+            # 通过 bash -s 运行
+            return 0
+        fi
+        # 检查 BASH_SOURCE[0] 是否是文件
+        if [ ! -f "${BASH_SOURCE[0]}" ]; then
+            return 0
+        fi
+    else
+        # 对于 sh（dash, ash 等）
+        # 管道执行时 $0 可能是 "-sh" 或空
+        case "$0" in
+            -sh|-bash|-ash|-dash)
+                return 0
+                ;;
+            "")
+                return 0
+                ;;
+        esac
+        # 检查 $0 是否是文件
+        if [ ! -f "$0" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# 检查是否需要 sudo 但可能无法交互输入
+needs_sudo_maybe_blocked() {
+    # 非 root 用户可能需要 sudo
+    if [ "$(id -u)" = "0" ]; then
+        # 已是 root，不需要 sudo
+        return 1
+    fi
+    # 非交互式环境可能无法输入密码
+    if ! is_interactive; then
         return 0
     fi
-    if [ ! -f "$0" ] && [ -z "${OLLAMA_SCRIPT_DIR:-}" ]; then
-        # $0 不是文件，说明可能通过管道运行
+    # 管道执行可能无法输入密码
+    if is_piped; then
         return 0
     fi
     return 1
@@ -418,12 +455,24 @@ if [ "$(id -u)" -ne 0 ]; then
         error "This script requires superuser permissions. Please re-run as root."
     fi
     
-    # 检查是否可以通过 sudo 无密码运行（Kerberos/Active Directory 等）
-    # 或者预验证 sudo 是否可用
-    echo ">>> Checking sudo access..."
-    if ! sudo -n true 2>/dev/null; then
-        echo ">>> [INFO] This script requires sudo privileges."
-        echo ">>> [INFO] If prompted, please enter your password."
+    # 检查是否可以通过 sudo 无密码运行
+    # 如果是非交互式环境，先给出警告，不要等待
+    if needs_sudo_maybe_blocked; then
+        echo ">>> [WARNING] This script may require sudo password."
+        echo ">>> [WARNING] If it hangs here, please run with: curl ... | sudo bash"
+        # 只检查 sudo 是否可用（不等待密码）
+        if sudo -n true 2>/dev/null; then
+            echo ">>> [INFO] Passwordless sudo is available."
+        else
+            echo ">>> [INFO] sudo requires password. Please ensure your terminal can accept input."
+        fi
+    else
+        # 交互式环境，正常检查
+        echo ">>> Checking sudo access..."
+        if ! sudo -n true 2>/dev/null; then
+            echo ">>> [INFO] This script requires sudo privileges."
+            echo ">>> [INFO] If prompted, please enter your password."
+        fi
     fi
     
     SUDO="sudo"
