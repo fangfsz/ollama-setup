@@ -82,37 +82,101 @@ fi
 # 测速超时时间（秒）
 SPEED_TEST_TIMEOUT=5
 
-# 获取脚本所在目录
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 获取脚本所在目录（支持 curl ... | bash 方式执行）
+# 尝试多种方法获取脚本目录
+get_script_dir() {
+    # 方法1：如果通过环境变量指定
+    if [ -n "${OLLAMA_SCRIPT_DIR:-}" ]; then
+        echo "$OLLAMA_SCRIPT_DIR"
+        return
+    fi
+    
+    # 方法2：如果 $0 是有效路径
+    if [ -f "$0" ] && [ -n "$(dirname "$0")" ]; then
+        (cd "$(dirname "$0")" && pwd)
+        return
+    fi
+    
+    # 方法3：尝试从 /proc 获取
+    if [ -L "/proc/self/exe" ]; then
+        local self_exe=$(readlink /proc/self/exe 2>/dev/null)
+        if [ -n "$self_exe" ]; then
+            (cd "$(dirname "$self_exe")" && pwd)
+            return
+        fi
+    fi
+    
+    # 方法4：使用当前工作目录
+    pwd
+}
+
+SCRIPT_DIR="$(get_script_dir)"
 
 ###########################################
 # 本地文件检测与Mirror选择函数
 ###########################################
 
 # 检查本地是否存在同名文件
+# 会在脚本目录和当前目录都查找
 # 返回值: 0=找到且有效, 1=未找到或无效
 check_local_file() {
     local filename="$1"
     local remote_size="$2"
+    
+    # 优先检查脚本目录
     local local_path="$SCRIPT_DIR/$filename"
-
-    if [ ! -f "$local_path" ]; then
-        return 1
+    debug "Checking script directory: $SCRIPT_DIR"
+    
+    if [ -f "$local_path" ]; then
+        debug "Found in script directory: $local_path"
+        # 检查文件大小
+        local local_size=$(stat -c%s "$local_path" 2>/dev/null || stat -f%z "$local_path" 2>/dev/null)
+        
+        # 如果远程文件大小已知，进行大小匹配
+        if [ -n "$remote_size" ] && [ "$remote_size" -gt 0 ]; then
+            if [ "$local_size" -eq "$remote_size" ] 2>/dev/null; then
+                debug "Size match: local=$local_size, remote=$remote_size"
+                return 0
+            else
+                debug "Size mismatch: local=$local_size, remote=$remote_size, continuing..."
+            fi
+        fi
+        
+        # 如果大小不匹配或未知，只要有文件就尝试使用
+        if [ "$local_size" -gt 0 ]; then
+            debug "Using local file (size: $local_size bytes)"
+            return 0
+        fi
     fi
-
-    # 检查文件大小
-    local local_size=$(stat -c%s "$local_path" 2>/dev/null || stat -f%z "$local_path" 2>/dev/null)
-
-    # 如果远程文件大小已知，进行大小匹配
-    if [ -n "$remote_size" ] && [ "$local_size" -eq "$remote_size" ] 2>/dev/null; then
-        return 0
+    
+    # 备选：检查当前工作目录
+    local cwd_path="$(pwd)/$filename"
+    debug "Checking current directory: $(pwd)"
+    
+    if [ -f "$cwd_path" ]; then
+        debug "Found in current directory: $cwd_path"
+        local local_size=$(stat -c%s "$cwd_path" 2>/dev/null || stat -f%z "$cwd_path" 2>/dev/null)
+        
+        # 如果远程文件大小已知，进行大小匹配
+        if [ -n "$remote_size" ] && [ "$remote_size" -gt 0 ]; then
+            if [ "$local_size" -eq "$remote_size" ] 2>/dev/null; then
+                debug "Size match: local=$local_size, remote=$remote_size"
+                # 返回当前目录的路径
+                echo "$cwd_path" > /dev/null
+                return 0
+            else
+                debug "Size mismatch: local=$local_size, remote=$remote_size, continuing..."
+            fi
+        fi
+        
+        # 如果大小不匹配或未知，只要有文件就尝试使用
+        if [ "$local_size" -gt 0 ]; then
+            debug "Using local file from current directory (size: $local_size bytes)"
+            return 0
+        fi
     fi
-
-    # 如果大小不匹配或未知，尝试直接使用（假设本地文件有效）
-    if [ -z "$remote_size" ] || [ "$local_size" -gt 0 ]; then
-        return 0
-    fi
-
+    
+    debug "Local file not found: $filename"
     return 1
 }
 
@@ -175,23 +239,35 @@ build_download_url() {
         *github.com*)
             debug "[BRANCH] GitHub URL detected"
             
-            # 获取远程文件大小用于本地文件匹配
-            debug "Fetching remote file size..."
-            local remote_size=$(curl -sI "$original_url" 2>/dev/null | grep -i content-length | awk '{print $2}' | tr -d '\r')
-            debug "Remote file size: $remote_size bytes"
-
             # 提取文件名（去掉查询参数）
             local filename=$(basename "$original_url" | sed 's/\?.*//')
             debug "Extracted filename: $filename"
 
-            # 检查本地文件
-            if check_local_file "$filename" "$remote_size"; then
-                branch "LOCAL file found, using: $SCRIPT_DIR/$filename"
+            # 优先检查本地文件 - 不需要等待远程响应
+            local local_file=""
+            
+            # 检查脚本目录
+            if [ -f "$SCRIPT_DIR/$filename" ]; then
+                local_file="$SCRIPT_DIR/$filename"
+                branch "LOCAL file found in script dir: $local_file"
                 debug "Local file check PASSED"
-                echo "LOCAL:$SCRIPT_DIR/$filename"
+            # 检查当前目录
+            elif [ -f "$(pwd)/$filename" ]; then
+                local_file="$(pwd)/$filename"
+                branch "LOCAL file found in current dir: $local_file"
+                debug "Local file check PASSED"
+            fi
+            
+            if [ -n "$local_file" ]; then
+                echo "LOCAL:$local_file"
                 return
             fi
-            branch "No local file found"
+            branch "No local file found, fetching remote file size..."
+            
+            # 获取远程文件大小用于后续参考
+            debug "Fetching remote file size..."
+            local remote_size=$(curl -sI "$original_url" 2>/dev/null | grep -i content-length | awk '{print $2}' | tr -d '\r')
+            debug "Remote file size: $remote_size bytes"
 
             # 本地不存在，进行测速选择
             debug "No local file, starting Mirror speed test..."
@@ -347,6 +423,38 @@ download_and_extract() {
         debug "OLLAMA_VERSION is not set, using LATEST"
     fi
 
+    # 优先检查本地文件 - 不需要等待远程响应
+    local zst_local=""
+    local tgz_local=""
+    
+    debug "Checking for local files..."
+    debug "Script dir: $SCRIPT_DIR"
+    debug "Current dir: $(pwd)"
+    
+    # 检查脚本目录 - .tar.zst
+    if [ -f "$SCRIPT_DIR/${filename}.tar.zst" ]; then
+        zst_local="$SCRIPT_DIR/${filename}.tar.zst"
+        branch "LOCAL .tar.zst found in script dir: $zst_local"
+        debug "Local .tar.zst check PASSED"
+    # 检查当前目录 - .tar.zst
+    elif [ -f "$(pwd)/${filename}.tar.zst" ]; then
+        zst_local="$(pwd)/${filename}.tar.zst"
+        branch "LOCAL .tar.zst found in current dir: $zst_local"
+        debug "Local .tar.zst check PASSED"
+    fi
+    
+    # 检查脚本目录 - .tgz
+    if [ -f "$SCRIPT_DIR/${filename}.tgz" ]; then
+        tgz_local="$SCRIPT_DIR/${filename}.tgz"
+        branch "LOCAL .tgz found in script dir: $tgz_local"
+        debug "Local .tgz check PASSED"
+    # 检查当前目录 - .tgz
+    elif [ -f "$(pwd)/${filename}.tgz" ]; then
+        tgz_local="$(pwd)/${filename}.tgz"
+        branch "LOCAL .tgz found in current dir: $tgz_local"
+        debug "Local .tgz check PASSED"
+    fi
+
     # 针对tar.zst和tgz格式分别处理
     # 先检查zst格式
     local original_zst_url="${full_url}.tar.zst${VER_PARAM}"
@@ -359,7 +467,7 @@ download_and_extract() {
     # Check if .tar.zst is available
     debug "Checking if .tar.zst is available..."
     if curl --fail --silent --head --location "$original_zst_url" >/dev/null 2>&1 || \
-       [ "${final_url:0:6}" = "LOCAL:" ]; then
+       [ -n "$zst_local" ]; then
         # zst file exists - check if we have zstd tool
         debug "[BRANCH] .tar.zst availability check: PASSED"
         branch ".tar.zst available (file exists or local found)"
@@ -379,16 +487,15 @@ download_and_extract() {
         debug "Destination directory: $dest_dir"
 
         # 处理本地文件
-        if [ "${final_url:0:6}" = "LOCAL:" ]; then
-            local local_file="${final_url#LOCAL:}"
-            debug "[BRANCH] Using LOCAL file"
-            branch "Using LOCAL file"
-            status "Local file: $local_file"
+        if [ -n "$zst_local" ]; then
+            debug "[BRANCH] Using LOCAL .tar.zst file"
+            branch "Using LOCAL .tar.zst file"
+            status "Local file: $zst_local"
             debug "Extracting local file with zstd..."
-            if ! zstd -d "$local_file" -c | $SUDO tar -xf - -C "${dest_dir}"; then
+            if ! zstd -d "$zst_local" -c | $SUDO tar -xf - -C "${dest_dir}"; then
                 debug "[BRANCH-ERROR] Local .tar.zst extraction: FAILED"
                 branch_error "Local .tar.zst extraction FAILED"
-                error "Failed to extract local file: $local_file"
+                error "Failed to extract local file: $zst_local"
             fi
             debug "Local .tar.zst extraction: SUCCESS"
             branch "Local .tar.zst extraction SUCCESS"
@@ -441,7 +548,7 @@ download_and_extract() {
     # Check if .tgz is available
     debug "Checking if .tgz is available..."
     if curl --fail --silent --head --location "$original_tgz_url" >/dev/null 2>&1 || \
-       [ "${final_url:0:6}" = "LOCAL:" ]; then
+       [ -n "$tgz_local" ]; then
         debug "[BRANCH] .tgz availability check: PASSED"
         branch ".tgz available (file exists or local found)"
     else
@@ -456,16 +563,15 @@ download_and_extract() {
     debug "Destination directory: $dest_dir"
 
     # 处理本地文件
-    if [ "${final_url:0:6}" = "LOCAL:" ]; then
-        local local_file="${final_url#LOCAL:}"
-        debug "[BRANCH] Using LOCAL file"
-        branch "Using LOCAL file"
-        status "Local file: $local_file"
+    if [ -n "$tgz_local" ]; then
+        debug "[BRANCH] Using LOCAL .tgz file"
+        branch "Using LOCAL .tgz file"
+        status "Local file: $tgz_local"
         debug "Extracting local file with tar..."
-        if ! cat "$local_file" | $SUDO tar -xzf - -C "${dest_dir}"; then
+        if ! cat "$tgz_local" | $SUDO tar -xzf - -C "${dest_dir}"; then
             debug "[BRANCH-ERROR] Local .tgz extraction: FAILED"
             branch_error "Local .tgz extraction FAILED"
-            error "Failed to extract local file: $local_file"
+            error "Failed to extract local file: $tgz_local"
         fi
         debug "Local .tgz extraction: SUCCESS"
         branch "Local .tgz extraction SUCCESS"
