@@ -134,17 +134,26 @@ function Test-LocalFile {
     param([string]$FileName)
 
     $scriptDir = Get-ScriptDirectory
-    $localPath = Join-Path $scriptDir $FileName
+    $scriptPath = Join-Path $scriptDir $FileName
+    $cwdPath = Join-Path (Get-Location) $FileName
 
     Write-Status "  [LOCAL] Checking for: $FileName"
-    Write-Status "  [LOCAL] Search path: $scriptDir"
-    Write-Status "  [LOCAL] Full path: $localPath"
+    Write-Status "  [LOCAL] Script dir: $scriptDir"
+    Write-Status "  [LOCAL] Current dir: $(Get-Location)"
 
-    if (Test-Path $localPath) {
-        $fileInfo = Get-Item $localPath
+    # 优先检查脚本目录
+    if (Test-Path $scriptPath) {
+        $fileInfo = Get-Item $scriptPath
         $fileSizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
-        Write-Status "  [LOCAL] Found! Size: $fileSizeMB MB, Modified: $($fileInfo.LastWriteTime)"
-        return $localPath
+        Write-Status "  [LOCAL] Found in script dir! Size: $fileSizeMB MB"
+        return $scriptPath
+    }
+    # 备选：检查当前工作目录
+    elseif (Test-Path $cwdPath) {
+        $fileInfo = Get-Item $cwdPath
+        $fileSizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
+        Write-Status "  [LOCAL] Found in current dir! Size: $fileSizeMB MB"
+        return $cwdPath
     }
     else {
         Write-Status "  [LOCAL] Not found"
