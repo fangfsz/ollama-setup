@@ -8,6 +8,38 @@ main() {
 
 set -eu
 
+# 脚本启动提示
+echo ">>> Ollama installation script started..."
+
+# 检测是否为交互式终端
+is_interactive() {
+    if [ ! -t 0 ]; then
+        # stdin 不是终端
+        return 1
+    fi
+    return 0
+}
+
+# 检查是否通过管道运行（curl ... | bash）
+is_piped() {
+    if [ -n "${BASH_VERSION:-}" ] && [ -z "${BASH_SOURCE[0]:-}" ]; then
+        # 通过 bash -s 运行（curl | bash 常用方式）
+        return 0
+    fi
+    if [ ! -f "$0" ] && [ -z "${OLLAMA_SCRIPT_DIR:-}" ]; then
+        # $0 不是文件，说明可能通过管道运行
+        return 0
+    fi
+    return 1
+}
+
+# 如果通过管道运行且没有交互式终端，给出警告
+if is_piped && ! is_interactive; then
+    echo ">>> [WARNING] Running via pipe (curl | bash) with non-interactive terminal."
+    echo ">>> [WARNING] If this script requires sudo, please ensure you have configured passwordless sudo."
+    echo ">>> [WARNING] Or run with: curl -fsSL <url> | sudo bash"
+fi
+
 red="$( (/usr/bin/tput bold || :; /usr/bin/tput setaf 1 || :) 2>&-)"
 plain="$( (/usr/bin/tput sgr0 || :) 2>&-)"
 
@@ -385,7 +417,15 @@ if [ "$(id -u)" -ne 0 ]; then
     if ! available sudo; then
         error "This script requires superuser permissions. Please re-run as root."
     fi
-
+    
+    # 检查是否可以通过 sudo 无密码运行（Kerberos/Active Directory 等）
+    # 或者预验证 sudo 是否可用
+    echo ">>> Checking sudo access..."
+    if ! sudo -n true 2>/dev/null; then
+        echo ">>> [INFO] This script requires sudo privileges."
+        echo ">>> [INFO] If prompted, please enter your password."
+    fi
+    
     SUDO="sudo"
 fi
 
