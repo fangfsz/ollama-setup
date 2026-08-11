@@ -519,6 +519,7 @@ download_and_extract() {
     debug "Checking for local files..."
     debug "Script dir: $SCRIPT_DIR"
     debug "Current dir: $(pwd)"
+    echo ">>> Checking local files..."
     
     # 检查脚本目录 - .tar.zst
     if [ -f "$SCRIPT_DIR/${filename}.tar.zst" ]; then
@@ -553,9 +554,10 @@ download_and_extract() {
     local final_url=$(build_download_url "$original_zst_url")
     debug "build_download_url() returned: $final_url"
 
-    # Check if .tar.zst is available
-    debug "Checking if .tar.zst is available..."
-    if curl --fail --silent --head --location "$original_zst_url" >/dev/null 2>&1 || \
+    # Check if .tar.zst is available (with timeout to avoid hanging)
+    debug "Checking if .tar.zst is available (timeout: ${SPEED_TEST_TIMEOUT}s)..."
+    echo ">>> Checking remote availability (timeout: 30s)..."
+    if curl --fail --silent --head --location --connect-timeout 10 --max-time 30 "$original_zst_url" >/dev/null 2>&1 || \
        [ -n "$zst_local" ]; then
         # zst file exists - check if we have zstd tool
         debug "[BRANCH] .tar.zst availability check: PASSED"
@@ -634,9 +636,9 @@ download_and_extract() {
     final_url=$(build_download_url "$original_tgz_url")
     debug "build_download_url() returned: $final_url"
 
-    # Check if .tgz is available
-    debug "Checking if .tgz is available..."
-    if curl --fail --silent --head --location "$original_tgz_url" >/dev/null 2>&1 || \
+    # Check if .tgz is available (with timeout to avoid hanging)
+    debug "Checking if .tgz is available (timeout: 30s)..."
+    if curl --fail --silent --head --location --connect-timeout 10 --max-time 30 "$original_tgz_url" >/dev/null 2>&1 || \
        [ -n "$tgz_local" ]; then
         debug "[BRANCH] .tgz availability check: PASSED"
         branch ".tgz available (file exists or local found)"
@@ -715,7 +717,6 @@ fi
 status "Installing ollama to $OLLAMA_INSTALL_DIR"
 $SUDO install -o0 -g0 -m755 -d $BINDIR
 $SUDO install -o0 -g0 -m755 -d "$OLLAMA_INSTALL_DIR/lib/ollama"
-status "====== Download Source Selection ======"
 download_and_extract "https://ollama.com/download" "$OLLAMA_INSTALL_DIR" "ollama-linux-${ARCH}"
 
 if [ "$OLLAMA_INSTALL_DIR/bin/ollama" != "$BINDIR/ollama" ] ; then
